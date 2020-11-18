@@ -1,0 +1,146 @@
+salt-run state.orch dns pillar='{"server": "SALT-20300-DCC","zone": "cotestdev.local","serverip": "172.26.75.106","dnsserver": "172.26.75.10","recordtype": "A"}' -l debug
+
+addserver:
+  ddns.present:
+    - name: {{ pillar['server'] }}
+    - zone: {{ pillar['zone'] }}
+    - ttl: 36
+    - data: {{ pillar['serverip'] }}
+    - nameserver: {{ pillar['dnsserver'] }}
+    - rdtype: {{ pillar['recordtype'] }}
+	
+=====================================================================
+
+salt-run state.orch getdatastore pillar='{"datacenter": "LDC","environment": "PROD","clusterrole": "UKA","packagename": "20.3.0.0-265","esxcluster": "DEV-NIX-01"}' -l debug
+
+{% set datastore = salt['cmdb_lib3.getDatastore'](pillar['datacenter'],pillar['environment'],pillar['clusterrole'],pillar['packagename'],pillar['esxcluster']) %}
+data1:
+  cmd.run:
+    - name: echo "{{ datastore }}"
+	
+======================================================================
+
+salt-run state.orch getdatastore pillar='{"datacenter": "LDC","environment": "PROD","clustername": "LDC-20300256-PROD-CSD-0001","vmname": "ldccsdp0001n001","dnsserver": "172.26.75.10", "recordtype": "CNAME"}' -l debug
+
+{% set islb =  salt['cmdb_lib3.isLoadBalanced']('ANY','20.3.0.0-265','UUW') %}
+data:
+  cmd.run:
+    - name: echo {{ islb }}
+
+{% set zone = salt['cmdb_lib3.zoneForVIP'](pillar['datacenter'],pillar['environment']) %}
+addcname:
+  ddns.present:
+    - name: {{ pillar['clustername'] }}
+    - zone: {{ zone }}
+    - ttl: 36
+    - data: {{ pillar['vmname'] }}
+    - nameserver: {{ pillar['dnsserver'] }}
+    - rdtype: {{ pillar['recordtype'] }}
+	
+=========================================================
+salt 'devutlupv042.cotestdev.local' state.apply addprometheus pillar='{"vm": "LDCUXDD0016N001","role": "UXD"}' -l debug
+
+{% set vm = pillar['vm'] %}
+{% set role = pillar['role'] %}
+{% set port = '9100' %}
+{% set check = [vm, port]|join(':') %}
+{% set nodenumber = salt['cmd.shell']('sudo grep -n  node_exporter /u00/prometheus1/prometheus.yml | cut -d: -f1')|int %}
+{% set group = ({"UKA":"kafka","UXD": "mysql","HAM":"sentinal","UMD":"mongo","UEB":"rabbitmq","DCC":"redis","SCC":"redis","UEC":"webhooks"}) %}
+data:
+  cmd.run:
+    - name: echo "{{ nodenumber }}"
+
+{% set status = salt["file.contains"]('/u00/prometheus1/prometheus.yml',check) %}
+{% if status %}
+stringnot:
+  cmd.run:
+    - name: echo "{{ vm }} exists under node exporter in yml file."
+
+{% else %}
+string:
+  cmd.run:
+    - name: |
+        sudo sed -i "{{ nodenumber + 2 }} a \            - targets: ['{{ vm }}:{{ port }}']" /u00/prometheus1/prometheus.yml
+        sudo sed -i '{{ nodenumber + 3 }} a \              labels:' /u00/prometheus1/prometheus.yml
+        sudo sed -i '{{ nodenumber + 4 }} a \                instance: {{ vm }}' /u00/prometheus1/prometheus.yml
+        sudo sed -i '{{ nodenumber + 5 }} a \                group: {{ group[role] }}' /u00/prometheus1/prometheus.yml
+{% endif %}
+
+============================================================================================================================
+salt 'devutlupv042.cotestdev.local' state.apply addvmtoroleprometheus pillar='{"vm": "LDCUXDD0017N001","role": "UXD"}' -l debug
+
+{% set vm = pillar['vm'] %}
+{% set role = pillar['role'] %}
+{% if role == 'UEC' %}
+noexporter:
+  cmd.run:
+    - name: echo "No role exporter for role UEC"
+{% else %}
+{% set data = ({"UXD":["9104","mssql_exporter","mysql"],"UMD":["9216","mongod_exporter","mongo"],"DCC":["9121","redis_exporter","redis"],"SCC":["9121","redis_exporter","redis"],"UEB":["9090","rabbitmq_exporter","rabbitmq"],"CSD":["7070","cassandra_exporter","cassandra"],"UKA":["7071","kafka_exporter","kafka"],"HAM":["9355","dcc_sentinal_exporter","sentinal"]}) %}
+
+{% set check = [vm, data[role][0]]|join(':') %}
+{% set nodenumber = salt.cmd.shell('sudo grep -n '~ data[role][1] ~' /u00/prometheus1/prometheus.yml | cut -d: -f1')|int %}
+data1:
+  cmd.run:
+    - name: echo "{{ nodenumber }}
+
+{% set status = salt["file.contains"]('/u00/prometheus1/prometheus.yml',check) %}
+{% if status %}
+    - name: echo "{{ vm }} exists under role exporter in yml file."
+
+{% else %}
+string:
+  cmd.run:
+    - name: |
+        sudo sed -i "{{ nodenumber + 2 }} a \            - targets: ['{{ vm }}:{{ data[role][0] }}']" /u00/prometheus1/prometheus.yml
+        sudo sed -i '{{ nodenumber + 3 }} a \              labels:' /u00/prometheus1/prometheus.yml
+        sudo sed -i '{{ nodenumber + 4 }} a \                instance: {{ vm }}' /u00/prometheus1/prometheus.yml
+        sudo sed -i '{{ nodenumber + 5 }} a \                group: {{ data[role][2] }}' /u00/prometheus1/prometheus.yml
+{% endif %}
+{% endif %}
+==============================================================================================================
+{% set mydatetime = salt["system.get_system_date_time"]() %}
+copyfile:
+  file.copy:
+    - name: /u00/prometheus1/backups/prometheus.yml.{{ mydatetime }}
+    - source: /u00/prometheus1/prometheus.yml
+    - force: True
+===============================================================================================================
+salt-run state.orch prometheus pillar='{"datacenter": "LDC","vm": "LDCUXDD0017N001","role": "UXD"}' -l debug
+
+{% set prometheusserver = salt['cmdb_lib3.prometheusvm'](pillar['datacenter']) %}
+addprometheus:
+  salt.state:
+    - sls:
+	  - backupprometheus
+      - addprometheus
+      - addvmtoroleprometheus
+    - tgt: {{ prometheusserver.lower() }}
+    - pillar:
+        vm: {{ pillar['vm'] }}
+        role: {{ pillar['role'] }}
+		
+====================================================================================================================
+salt-run state.orch querydns pillar='{"datacenter": "LDC","ip": "172.26.30.212"}' -l debug
+
+{% set dns =  salt['cmdb_lib3.getDNS'](pillar['datacenter']) %}
+{% set domain =  salt['cmdb_lib3.domain'](pillar['datacenter']) %}
+{% set ip = pillar['ip'] %}
+{% set atdns = 'dig @'~ dns ~' '~ domain ~' axfr| grep -w '~ ip ~'' %}
+{% if salt['cmd.shell'](atdns) %}
+data:
+  cmd.run:
+    - name: echo "no valid ip"
+{% else %}
+data1:
+  cmd.run:
+    - name: echo "valid ip"
+{% endif %}
+
+{#
+querydns:
+  cmd.run:
+    - name: dig @{{ dns }} {{ domain }} axfr | grep -w {{ pillar['ip'] }}
+
+#}
+=====================================================================================================================
